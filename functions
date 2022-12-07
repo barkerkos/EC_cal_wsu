@@ -1,0 +1,214 @@
+import glob
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+import pickle
+import math
+import time
+pd.options.mode.chained_assignment = None  # default='warn'
+
+# despike function
+def despike(data, threshold_u_std, threshold_t_std, threshold_spikenumber, time_set='00.1'):
+    data_despike = data  # copy
+    spike_number = 0
+
+    for i in range(len(data['TIMESTAMP'])):
+        if data['TIMESTAMP'].iloc[i].endswith(time_set):  # skip if not the whole point, 00:00.01
+            data_slice = data.get(['TIMESTAMP', 'Ux_up', 'Uy_up', 'Uz_up', 'Ts_up']).iloc[
+                         i:i + 600]  # seperate 1 min data
+
+            for variables in ['Ux_up', 'Uy_up', 'Uz_up']:
+                spike_index_list = []
+
+                u_index = range(len(data_slice[variables]))
+                reg = LinearRegression().fit(np.array(u_index).reshape(-1, 1), data_slice[variables])
+
+                for index in range(len(data_slice)):
+                    if np.abs(data_slice[variables].iloc[index] - data_slice[variables].mean()) > \
+                            threshold_u_std * data_slice[variables].std():
+                        spike_index_list.append(index)
+                continue_list = despike_continue_check(spike_index_list,
+                                                       threshold_spikenumber)  # >= 3 continue spikes will be kept
+
+                data_slice_despike = data_slice  # copy data for despike
+                for index in spike_index_list:
+                    # print('index',index)
+                    if len(continue_list) != 0:
+                        if index not in continue_list:
+                            data_slice_despike[variables].iloc[index] = reg.coef_ * index + reg.intercept_
+                            spike_number = spike_number + 1
+                            # print('substitute')
+                    else:
+                        data_slice_despike[variables].iloc[index] = reg.coef_ * index + reg.intercept_
+                        spike_number = spike_number + 1
+                        # print('substitute')
+                data_despike[variables].iloc[i:i + 600] = data_slice_despike[variables]
+
+            for variables in ['Ts_up']:
+                spike_index_list = []
+                u_index = range(len(data_slice[variables]))
+                reg = LinearRegression().fit(np.array(u_index).reshape(-1, 1), data_slice[variables])
+                for index in range(len(data_slice)):
+                    if np.abs(data_slice[variables].iloc[index] - data_slice[variables].mean()) > threshold_t_std * \
+                            data_slice[variables].std():
+                        spike_index_list.append(index)
+                continue_list = despike_continue_check(spike_index_list,
+                                                       threshold_spikenumber)  # >= 3 continue spikes will be kept
+                data_slice_despike = data_slice  # copy data for despike
+                for index in spike_index_list:
+                    # print('index',index)
+                    if len(continue_list) != 0:
+                        if index not in continue_list:
+                            data_slice_despike[variables].iloc[index] = reg.coef_ * index + reg.intercept_
+                            spike_number = spike_number + 1
+                            # print('substitute')
+                    else:
+                        data_slice_despike[variables].iloc[index] = reg.coef_ * index + reg.intercept_
+                        spike_number = spike_number + 1
+                        # print('substitute')
+                data_despike[variables].iloc[i:i + 600] = data_slice_despike[variables]
+    # print('done')
+    return data_despike, spike_number
+
+
+def despike_continue_check(spike_index_list,
+                           threshold_spikenumber):  # return a list of continue index where are not spike
+    result_list = []
+    continues_spike = 0
+    index = 0
+    continue_list = []
+    while index + 1 < len(spike_index_list):  # control not exceed the range of list
+        if spike_index_list[index] + 1 != spike_index_list[index + 1]:
+            # print(spike_index_list[index],spike_index_list[index+1],'not continue')
+            index = index + 1
+            continues_spike = 0
+            continue
+        while spike_index_list[index] + 1 == spike_index_list[index + 1]:
+            # print(spike_index_list[index],spike_index_list[index+1],'continue')
+            continues_spike = continues_spike + 1
+            if index + 1 == len(spike_index_list) - 1:  # check whether the last number is continue
+                if continues_spike >= threshold_spikenumber - 1:
+                    result_list.append(spike_index_list[index - continues_spike + 1:index + 2])
+                index = index + 1
+                break
+            index = index + 1
+            if spike_index_list[index] + 1 != spike_index_list[index + 1]:  # when not continue, output
+                # print ('continues spike:',continues_spike)
+                # print(spike_index_list[index],spike_index_list[index+1])
+                # print(spike_index_list[index-continues_spike:index+1])
+                if continues_spike >= threshold_spikenumber - 1:
+                    result_list.append(spike_index_list[index - continues_spike:index + 1])
+                break
+    for value in result_list:
+        for index in value:
+            continue_list.append(index)
+    return continue_list
+
+
+def despike_5times(data, threshold_u_std, threshold_t_std, threshold_spikenumber, time_set='00.1'):
+    data_despike = data
+    repeat = 0
+    data_despike, spike_number = despike(data_despike, threshold_u_std=threshold_u_std, threshold_t_std=threshold_t_std,
+                                         threshold_spikenumber=threshold_spikenumber, time_set=time_set)
+    print('spike:', spike_number)
+    while spike_number > 0 and repeat < 5:
+        threshold_u_std = threshold_u_std + 0.1
+        threshold_t_std = threshold_t_std + 0.5
+        data_despike, spike_number = despike(data_despike, threshold_u_std=threshold_u_std,
+                                             threshold_t_std=threshold_t_std,
+                                             threshold_spikenumber=threshold_spikenumber, time_set=time_set)
+        print('spike:', spike_number)
+        repeat = repeat + 1
+    print('repeat time:', repeat)
+    return data_despike, spike_number
+
+
+def get_mean_wind_direction(ux_hourly, uy_hourly):
+    # CSAT3 head point to north, 0 radius from north to south (0-2pi), clockwise
+    if uy_hourly.mean() > 0 and ux_hourly.mean() > 0:
+        theta = 2 * np.pi - np.arctan(uy_hourly.mean() / ux_hourly.mean())
+    elif uy_hourly.mean() > 0 and ux_hourly.mean() < 0:
+        theta = np.pi - np.arctan(uy_hourly.mean() / ux_hourly.mean())
+    elif uy_hourly.mean() < 0 and ux_hourly.mean() < 0:
+        theta = np.pi - np.arctan(uy_hourly.mean() / ux_hourly.mean())
+    elif uy_hourly.mean() < 0 and ux_hourly.mean() > 0:
+        theta = -np.arctan(uy_hourly.mean() / ux_hourly.mean())
+    elif uy_hourly.mean() == 0 and ux_hourly.mean() > 0:
+        theta = 0
+    elif uy_hourly.mean() < 0 and ux_hourly.mean() == 0:
+        theta = np.pi / 2
+    elif uy_hourly.mean() == 0 and ux_hourly.mean() < 0:
+        theta = np.pi
+    elif uy_hourly.mean() > 0 and ux_hourly.mean() == 0:
+        theta = 1.5 * np.pi
+    elif uy_hourly.mean() == 0 and ux_hourly.mean() == 0:
+        theta = 0
+    return theta
+
+
+def rotate(u, v):  # rotate wind direction
+    angle_xy = get_mean_wind_direction(u, v)
+    u_ins_rotated = u * np.cos(angle_xy) + v * np.sin(angle_xy)
+    v_ins_rotated = v * np.cos(angle_xy) - u * np.sin(angle_xy)
+    return [u_ins_rotated, v_ins_rotated]
+
+
+# detrend
+def detrend(u, u_index):
+    reg = LinearRegression().fit(np.array(u_index).reshape(-1, 1), u)
+    u_tur_detrend = u - (reg.coef_ * u_index + reg.intercept_)
+    return u_tur_detrend
+
+
+def cal_flux(data_direction, time_set, time_processed, bad_data_ratio):
+    # read data
+    data = pd.read_csv(data_direction, skiprows=[0, 2, 3], header=[0])
+    data[['Ux_up', 'Uy_up', 'Uz_up', 'Ts_up']] = data[['Ux_up', 'Uy_up', 'Uz_up', 'Ts_up']].astype(float)
+
+    for i in range(len(data['TIMESTAMP'])):
+        if data['TIMESTAMP'].iloc[i].endswith(time_set):  # skip if not the whole point, 00:00.01
+            data_slice = data[['TIMESTAMP', 'Ux_up', 'Uy_up', 'Uz_up', 'Ts_up']].iloc[i:i + time_processed]
+
+            nan_ratio_list = []
+            for variables in ['Ux_up', 'Uy_up', 'Uz_up', 'Ts_up']:
+                nan_ratio_list.append(data_slice[variables].isna().sum() / time_processed)
+            nan_ratio = max(nan_ratio_list)
+            # print(nan_ratio)
+
+            if nan_ratio < bad_data_ratio:
+                data_despike, spike_number = despike_5times(data_slice.dropna(), threshold_u_std=3.5,
+                                                            threshold_t_std=3.5, threshold_spikenumber=3)
+                # rotate to the main direction
+                u_rotated, v_rotated = rotate(data_despike['Ux_up'], data_despike['Uy_up'])
+                # detrend
+                u_index = range(len(u_rotated))
+                v_index = range(len(v_rotated))
+                u_detrended = detrend(u_rotated, u_index)
+                # print(data_slice['Ux_up'],u_rotated,u_detrended)
+
+                v_detrended = detrend(v_rotated, v_index)
+                # calculate flux
+                df_final = data_slice
+                df_final['Ux_up'] = u_detrended
+                df_final['Uy_up'] = v_detrended
+                result = df_final.cov()
+            else:
+                print('too many NAN')
+                result = 0
+
+    return result
+
+def main():
+    direction = '/projectnb/urbanclimate/zhihengl/MSdata_sample/1day/'
+    data_list = glob.glob(direction+'*_*.dat')
+    time_processed = 60*60*10 # 1 hour
+    # set starting time
+    time_set = '00:00.1'
+    # set bad data ratio threshold
+    bad_data_ratio = 0.1
+    for data_direction in data_list:
+        print(data_direction)
+        result = cal_flux(data_direction,time_set,time_processed,bad_data_ratio)
+        print(result)
+    return 0
